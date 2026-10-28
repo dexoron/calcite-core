@@ -6,4 +6,5 @@
 .vs
 /out
 vcpkg_installed
+/target
 

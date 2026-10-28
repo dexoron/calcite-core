@@ -30,7 +30,7 @@ impl fmt::Debug for Uuid {
     }
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Eq, PartialEq, thiserror::Error)]
 pub enum CoreError {
     #[error("entity pool is full")]
     PoolFull,

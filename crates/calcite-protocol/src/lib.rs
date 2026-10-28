@@ -1,6 +1,6 @@
 //! Minecraft protocol primitives for the protocol-775 migration target.
 
-use bytes::{Buf, BufMut, BytesMut};
+use bytes::{BufMut, BytesMut};
 
 pub const PROTOCOL_VERSION: i32 = 775;
 pub const MINECRAFT_VERSION: &str = "26.1.2";
@@ -17,6 +17,77 @@ pub enum ProtocolError {
     Truncated,
     #[error("packet contains unexpected trailing data")]
     TrailingData,
+    #[error("unexpected packet id {0}")]
+    UnexpectedPacketId(i32),
+    #[error("unsupported protocol version {0}")]
+    UnsupportedProtocolVersion(i32),
+    #[error("invalid handshake next state {0}")]
+    InvalidNextState(i32),
+    #[error("server address is too long")]
+    ServerAddressTooLong,
+    #[error("server address is not valid UTF-8")]
+    InvalidServerAddress,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandshakeIntent {
+    Status,
+    Login,
+    Transfer,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Handshake {
+    pub protocol_version: i32,
+    pub server_address: String,
+    pub server_port: u16,
+    pub intent: HandshakeIntent,
+}
+
+/// Decode the uncompressed handshake payload (packet id through next-state).
+/// Protocol 775 is intentionally enforced so packet layouts from other
+/// Minecraft versions cannot silently enter the state machine.
+pub fn parse_handshake(mut payload: &[u8]) -> Result<Handshake, ProtocolError> {
+    let packet_id = read_var_i32(&mut payload)?;
+    if packet_id != 0 {
+        return Err(ProtocolError::UnexpectedPacketId(packet_id));
+    }
+    let protocol_version = read_var_i32(&mut payload)?;
+    if protocol_version != PROTOCOL_VERSION {
+        return Err(ProtocolError::UnsupportedProtocolVersion(protocol_version));
+    }
+    let address_len = read_var_i32(&mut payload)?;
+    if !(0..=255).contains(&address_len) {
+        return Err(ProtocolError::ServerAddressTooLong);
+    }
+    let address_len = address_len as usize;
+    if payload.len() < address_len {
+        return Err(ProtocolError::Truncated);
+    }
+    let server_address = std::str::from_utf8(&payload[..address_len])
+        .map_err(|_| ProtocolError::InvalidServerAddress)?
+        .to_owned();
+    payload = &payload[address_len..];
+    if payload.len() < 2 {
+        return Err(ProtocolError::Truncated);
+    }
+    let server_port = u16::from_be_bytes([payload[0], payload[1]]);
+    payload = &payload[2..];
+    let intent = match read_var_i32(&mut payload)? {
+        1 => HandshakeIntent::Status,
+        2 => HandshakeIntent::Login,
+        3 => HandshakeIntent::Transfer,
+        value => return Err(ProtocolError::InvalidNextState(value)),
+    };
+    if !payload.is_empty() {
+        return Err(ProtocolError::TrailingData);
+    }
+    Ok(Handshake {
+        protocol_version,
+        server_address,
+        server_port,
+        intent,
+    })
 }
 
 pub fn read_var_i32(buf: &mut &[u8]) -> Result<i32, ProtocolError> {
@@ -118,5 +189,57 @@ mod tests {
             decode_frame(&mut input),
             Err(ProtocolError::NegativePacketLength)
         );
+    }
+
+    fn handshake_bytes(version: i32, intent: i32) -> Vec<u8> {
+        let mut out = Vec::new();
+        write_var_i32(0, &mut out);
+        write_var_i32(version, &mut out);
+        write_string("localhost", &mut out).unwrap();
+        out.extend_from_slice(&25565u16.to_be_bytes());
+        write_var_i32(intent, &mut out);
+        out
+    }
+
+    #[test]
+    fn parses_protocol_775_handshake() {
+        let parsed = parse_handshake(&handshake_bytes(PROTOCOL_VERSION, 2)).unwrap();
+        assert_eq!(parsed.server_address, "localhost");
+        assert_eq!(parsed.server_port, 25565);
+        assert_eq!(parsed.intent, HandshakeIntent::Login);
+    }
+
+    #[test]
+    fn rejects_handshake_with_wrong_packet_id() {
+        let mut payload = handshake_bytes(PROTOCOL_VERSION, 1);
+        payload[0] = 1;
+        assert_eq!(
+            parse_handshake(&payload),
+            Err(ProtocolError::UnexpectedPacketId(1))
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_version_and_intent() {
+        assert_eq!(
+            parse_handshake(&handshake_bytes(774, 1)),
+            Err(ProtocolError::UnsupportedProtocolVersion(774))
+        );
+        assert_eq!(
+            parse_handshake(&handshake_bytes(PROTOCOL_VERSION, 9)),
+            Err(ProtocolError::InvalidNextState(9))
+        );
+    }
+
+    #[test]
+    fn rejects_truncated_and_trailing_handshake() {
+        let payload = handshake_bytes(PROTOCOL_VERSION, 1);
+        assert_eq!(
+            parse_handshake(&payload[..payload.len() - 1]),
+            Err(ProtocolError::Truncated)
+        );
+        let mut trailing = payload;
+        trailing.push(0);
+        assert_eq!(parse_handshake(&trailing), Err(ProtocolError::TrailingData));
     }
 }
