@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/calcite-core",
+    "crates/calcite-protocol",
+    "crates/calcite-entity",
+    "crates/calcite-world",
+    "crates/calcite-net",
+    "crates/calcite-server",
+]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+license = "MIT"
+rust-version = "1.85"
+
+[workspace.dependencies]
+thiserror = "2.0"
+bytes = "1.10"
+tokio = { version = "1.48", features = ["macros", "net", "rt-multi-thread", "time", "io-util"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+

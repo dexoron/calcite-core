@@ -1,0 +1,13 @@
+[package]
+name = "calcite-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+calcite-protocol = { path = "../calcite-protocol" }
+tokio.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+
