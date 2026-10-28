@@ -95,6 +95,9 @@ pub fn read_var_i32(buf: &mut &[u8]) -> Result<i32, ProtocolError> {
     for shift in (0..35).step_by(7) {
         let byte = *buf.first().ok_or(ProtocolError::Truncated)?;
         *buf = &buf[1..];
+        if shift == 28 && byte & 0x70 != 0 {
+            return Err(ProtocolError::VarIntTooBig);
+        }
         result |= u32::from(byte & 0x7f) << shift;
         if byte & 0x80 == 0 {
             return Ok(result as i32);
@@ -188,6 +191,28 @@ mod tests {
         assert_eq!(
             decode_frame(&mut input),
             Err(ProtocolError::NegativePacketLength)
+        );
+    }
+
+    #[test]
+    fn rejects_varint_with_noncanonical_fifth_byte() {
+        let mut input = &[0xff, 0xff, 0xff, 0xff, 0x10][..];
+        assert_eq!(read_var_i32(&mut input), Err(ProtocolError::VarIntTooBig));
+    }
+
+    #[test]
+    fn rejects_invalid_utf8_handshake_address() {
+        let mut payload = Vec::new();
+        write_var_i32(0, &mut payload);
+        write_var_i32(PROTOCOL_VERSION, &mut payload);
+        write_var_i32(1, &mut payload);
+        payload.push(0xff);
+        payload.extend_from_slice(&25565u16.to_be_bytes());
+        write_var_i32(1, &mut payload);
+
+        assert_eq!(
+            parse_handshake(&payload),
+            Err(ProtocolError::InvalidServerAddress)
         );
     }
 
