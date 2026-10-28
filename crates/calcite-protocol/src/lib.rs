@@ -11,6 +11,8 @@ pub enum ProtocolError {
     VarIntTooBig,
     #[error("packet length exceeds configured maximum")]
     PacketTooLarge,
+    #[error("packet length cannot be negative")]
+    NegativePacketLength,
     #[error("packet is truncated")]
     Truncated,
     #[error("packet contains unexpected trailing data")]
@@ -63,9 +65,9 @@ pub fn decode_frame(buf: &mut BytesMut) -> Result<Option<BytesMut>, ProtocolErro
     let mut view = &buf[..];
     let length = match read_var_i32(&mut view) {
         Ok(value) if value >= 0 => value as usize,
+        Ok(_) => return Err(ProtocolError::NegativePacketLength),
         Err(ProtocolError::Truncated) => return Ok(None),
         Err(error) => return Err(error),
-        _ => unreachable!(),
     };
     if view.len() < length {
         return Ok(None);
@@ -106,6 +108,15 @@ mod tests {
         assert_eq!(
             decode_frame(&mut input).unwrap().unwrap(),
             &b"\x01\x02\x03"[..]
+        );
+    }
+
+    #[test]
+    fn negative_frame_length_is_rejected() {
+        let mut input = BytesMut::from(&[0xff, 0xff, 0xff, 0xff, 0x0f][..]);
+        assert_eq!(
+            decode_frame(&mut input),
+            Err(ProtocolError::NegativePacketLength)
         );
     }
 }
