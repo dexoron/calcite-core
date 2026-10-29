@@ -144,6 +144,19 @@ mod tests {
     }
 
     #[test]
+    fn frame_decoder_accepts_status_fixtures_at_every_split_boundary() {
+        let fixture = [0x01, 0x00, 0x09, 0x01, 1, 2, 3, 4, 5, 6, 7, 8];
+        for split in 0..=fixture.len() {
+            let mut decoder = FrameDecoder::new(16);
+            let mut frames = decoder.push(&fixture[..split]).unwrap();
+            frames.extend(decoder.push(&fixture[split..]).unwrap());
+            assert_eq!(frames.len(), 2, "split={split}");
+            assert_eq!(frames[0].as_ref(), &[0]);
+            assert_eq!(frames[1].as_ref(), &[0x01, 1, 2, 3, 4, 5, 6, 7, 8]);
+        }
+    }
+
+    #[test]
     fn frame_decoder_rejects_payload_over_limit() {
         let frame = calcite_protocol::encode_frame(b"oversized").unwrap();
         let mut decoder = FrameDecoder::new(4);

@@ -27,6 +27,12 @@ pub enum ProtocolError {
     ServerAddressTooLong,
     #[error("server address is not valid UTF-8")]
     InvalidServerAddress,
+    #[error("invalid login packet id {0}")]
+    InvalidLoginPacketId(i32),
+    #[error("player name must contain between 1 and 16 bytes")]
+    InvalidPlayerName,
+    #[error("login UUID derivation is unavailable until a vetted crypto dependency is selected")]
+    OfflineUuidUnavailable,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +48,46 @@ pub struct Handshake {
     pub server_address: String,
     pub server_port: u16,
     pub intent: HandshakeIntent,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoginStart {
+    pub name: String,
+    pub client_uuid: [u8; 16],
+}
+
+/// Parse the protocol-775 Login Start payload. Offline UUID derivation is
+/// intentionally separate: the C++ oracle uses MD5, but this crate does not
+/// yet carry a vetted crypto dependency, so no hand-rolled implementation is
+/// provided.
+pub fn parse_login_start(mut payload: &[u8]) -> Result<LoginStart, ProtocolError> {
+    let packet_id = read_var_i32(&mut payload)?;
+    if packet_id != 0 {
+        return Err(ProtocolError::InvalidLoginPacketId(packet_id));
+    }
+    let name_len = read_var_i32(&mut payload)?;
+    if !(1..=16).contains(&name_len) {
+        return Err(ProtocolError::InvalidPlayerName);
+    }
+    let name_len = name_len as usize;
+    if payload.len() < name_len + 16 {
+        return Err(ProtocolError::Truncated);
+    }
+    let name = std::str::from_utf8(&payload[..name_len])
+        .map_err(|_| ProtocolError::InvalidServerAddress)?
+        .to_owned();
+    payload = &payload[name_len..];
+    let mut client_uuid = [0u8; 16];
+    client_uuid.copy_from_slice(&payload[..16]);
+    payload = &payload[16..];
+    if !payload.is_empty() {
+        return Err(ProtocolError::TrailingData);
+    }
+    Ok(LoginStart { name, client_uuid })
+}
+
+pub fn derive_offline_uuid(_name: &str) -> Result<[u8; 16], ProtocolError> {
+    Err(ProtocolError::OfflineUuidUnavailable)
 }
 
 /// Decode the uncompressed handshake payload (packet id through next-state).
@@ -235,6 +281,27 @@ mod tests {
     }
 
     #[test]
+    fn protocol_775_status_handshake_matches_wire_fixture() {
+        let expected = [
+            0x00, 0x87, 0x06, 0x09, b'l', b'o', b'c', b'a', b'l', b'h', b'o', b's', b't', 0x63,
+            0xDD, 0x01,
+        ];
+        assert_eq!(handshake_bytes(PROTOCOL_VERSION, 1), expected);
+        let parsed = parse_handshake(&expected).unwrap();
+        assert_eq!(parsed.intent, HandshakeIntent::Status);
+    }
+
+    #[test]
+    fn status_request_and_ping_frames_match_cxx_fixtures() {
+        assert_eq!(encode_frame(&[0]).unwrap().as_ref(), &[0x01, 0x00]);
+        let ping = [0x01, 1, 2, 3, 4, 5, 6, 7, 8];
+        assert_eq!(
+            encode_frame(&ping).unwrap().as_ref(),
+            &[0x09, 0x01, 1, 2, 3, 4, 5, 6, 7, 8]
+        );
+    }
+
+    #[test]
     fn rejects_handshake_with_wrong_packet_id() {
         let mut payload = handshake_bytes(PROTOCOL_VERSION, 1);
         payload[0] = 1;
@@ -266,5 +333,52 @@ mod tests {
         let mut trailing = payload;
         trailing.push(0);
         assert_eq!(parse_handshake(&trailing), Err(ProtocolError::TrailingData));
+    }
+
+    fn login_bytes(name: &[u8], uuid: [u8; 16]) -> Vec<u8> {
+        let mut payload = Vec::new();
+        write_var_i32(0, &mut payload);
+        write_var_i32(name.len() as i32, &mut payload);
+        payload.extend_from_slice(name);
+        payload.extend_from_slice(&uuid);
+        payload
+    }
+
+    #[test]
+    fn parses_login_start() {
+        let uuid = [7; 16];
+        let parsed = parse_login_start(&login_bytes(b"Steve", uuid)).unwrap();
+        assert_eq!(parsed.name, "Steve");
+        assert_eq!(parsed.client_uuid, uuid);
+    }
+
+    #[test]
+    fn rejects_malformed_login_start() {
+        assert_eq!(
+            parse_login_start(&[0, 0]),
+            Err(ProtocolError::InvalidPlayerName)
+        );
+        assert_eq!(
+            parse_login_start(&[1]),
+            Err(ProtocolError::InvalidLoginPacketId(1))
+        );
+        assert_eq!(
+            parse_login_start(&login_bytes(b"Steve", [0; 16])[..20]),
+            Err(ProtocolError::Truncated)
+        );
+        let mut trailing = login_bytes(b"Steve", [0; 16]);
+        trailing.push(0);
+        assert_eq!(
+            parse_login_start(&trailing),
+            Err(ProtocolError::TrailingData)
+        );
+    }
+
+    #[test]
+    fn offline_uuid_requires_vetted_crypto_dependency() {
+        assert_eq!(
+            derive_offline_uuid("Steve"),
+            Err(ProtocolError::OfflineUuidUnavailable)
+        );
     }
 }
