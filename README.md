@@ -3,8 +3,8 @@
 Minecraft Java Edition server implementation in C++.
 
 Calcite is migrating this C++ implementation to an idiomatic Rust 2024
-workspace. The C++ tree remains the behavioral oracle while the Rust crates
-are built up incrementally on branch `perepisyvanie-na-rust`.
+workspace; the C++ tree remains the behavioral oracle on branch
+`perepisyvanie-na-rust`.
 
 ## Architectural Choices
 
@@ -32,34 +32,14 @@ You can see how other player move around and see their and your chat messages. B
 
 ## Rust migration / Миграция на Rust
 
-### Implemented / Реализовано
+Implemented / Реализовано: Cargo workspace; protocol 775 (`26.1.2`) handshake,
+VarInt framing, status ping/pong with partial reads; initial chunk indexing and
+player-pool invariants.
 
-- Cargo workspace crates for core types, protocol, networking, entities,
-  world, and server layers.
-- Minecraft Java protocol 775 (`26.1.2`) handshake validation and framed
-  VarInt packet primitives.
-- Status request/ping and pong handling, including partial TCP frame reads.
-- Initial chunk storage with explicit global-to-local coordinate mapping and
-  player pool capacity/slot reuse invariants.
+Incomplete / Не реализовано: full Login/Configuration/Play, compression,
+encryption, live-client compatibility, persistent worlds, complete chunk data,
+and synchronized gameplay. The C++ tree remains the compatibility reference.
 
-### Not implemented / Не реализовано
-
-- Full Login, Configuration, Play, compression, encryption, and live-client
-  compatibility remain incomplete.
-- Persistent world storage, complete chunk/light/block-entity serialization,
-  and synchronized gameplay state are not yet available.
-- The C++ implementation above remains the reference until each subsystem is
-  ported and regression-tested.
-
-### Build and test / Сборка и тесты
-
-```powershell
-cargo test --workspace
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo run -p calcite-server
-```
-
-The Rust server currently accepts a TCP listener and exercises the protocol
-framing/status path; use the C++ build for the broader gameplay behavior until
-those migration stages are complete.
+Checks / Проверки: `cargo test --workspace`; `cargo fmt --all -- --check`;
+`cargo clippy --workspace --all-targets -- -D warnings`; run with
+`cargo run -p calcite-server`.
