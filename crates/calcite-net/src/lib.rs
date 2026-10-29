@@ -1,5 +1,5 @@
 use bytes::BytesMut;
-use calcite_protocol::{ProtocolError, decode_frame, read_var_i32};
+use calcite_protocol::{LoginStart, ProtocolError, decode_frame, parse_login_start, read_var_i32};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionState {
@@ -11,13 +11,17 @@ pub enum ConnectionState {
     Closed,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ConnectionError {
     #[error("invalid connection state transition from {from:?} to {to:?}")]
     InvalidTransition {
         from: ConnectionState,
         to: ConnectionState,
     },
+    #[error("protocol error while parsing login start: {0}")]
+    Protocol(#[from] ProtocolError),
+    #[error("offline UUID derivation is unavailable; Login Success is not emitted")]
+    OfflineUuidUnavailable,
 }
 
 impl ConnectionState {
@@ -64,6 +68,20 @@ impl Connection {
     pub fn transition(&mut self, next: ConnectionState) -> Result<(), ConnectionError> {
         self.state = self.state.transition(next)?;
         Ok(())
+    }
+
+    pub fn parse_login_start(&self, payload: &[u8]) -> Result<LoginStart, ConnectionError> {
+        if self.state != ConnectionState::Login {
+            return Err(ConnectionError::InvalidTransition {
+                from: self.state,
+                to: ConnectionState::Login,
+            });
+        }
+        Ok(parse_login_start(payload)?)
+    }
+
+    pub fn login_success(&self, _login: &LoginStart) -> Result<(), ConnectionError> {
+        Err(ConnectionError::OfflineUuidUnavailable)
     }
 }
 
@@ -127,6 +145,37 @@ mod tests {
             })
         );
         assert_eq!(connection.state(), ConnectionState::Handshake);
+    }
+
+    #[test]
+    fn login_start_is_parsed_but_success_remains_blocked() {
+        let mut connection = Connection::new();
+        connection.transition(ConnectionState::Login).unwrap();
+        let mut payload = vec![0, 5];
+        payload.extend_from_slice(b"Steve");
+        payload.extend_from_slice(&[7; 16]);
+        let login = connection.parse_login_start(&payload).unwrap();
+        assert_eq!(login.name, "Steve");
+        assert_eq!(
+            connection.login_success(&login),
+            Err(ConnectionError::OfflineUuidUnavailable)
+        );
+        assert_eq!(connection.state(), ConnectionState::Login);
+    }
+
+    #[test]
+    fn login_start_requires_login_state_and_rejects_malformed_payload() {
+        let connection = Connection::new();
+        assert!(matches!(
+            connection.parse_login_start(&[0]),
+            Err(ConnectionError::InvalidTransition { .. })
+        ));
+        let mut connection = Connection::new();
+        connection.transition(ConnectionState::Login).unwrap();
+        assert_eq!(
+            connection.parse_login_start(&[0, 0]),
+            Err(ConnectionError::Protocol(ProtocolError::InvalidPlayerName))
+        );
     }
 
     #[test]
