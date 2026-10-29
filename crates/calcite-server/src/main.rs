@@ -45,7 +45,7 @@ pub fn configuration_fixture_stream() -> &'static [&'static [u8]] {
 
 pub async fn run_configuration(
     mut socket: TcpStream,
-    connection: Connection,
+    mut connection: Connection,
     max_frame: usize,
 ) -> Result<Connection> {
     if connection.state() != ConnectionState::Configuration {
@@ -71,9 +71,14 @@ pub async fn run_configuration(
         if count == 0 {
             anyhow::bail!("connection closed before configuration acknowledgement");
         }
-        if let Some(frame) = decoder.push(&read_buf[..count])?.first() {
+        for frame in decoder.push(&read_buf[..count])? {
+            // C++ accepts Client Information during Configuration before the
+            // finish acknowledgement; its fields are not needed yet.
+            if frame.first() == Some(&0x00) {
+                continue;
+            }
             connection
-                .validate_configuration_ack(frame)
+                .acknowledge_configuration(&frame)
                 .map_err(|error| anyhow::anyhow!(error))?;
             return Ok(connection);
         }
