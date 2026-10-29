@@ -1,5 +1,8 @@
 use bytes::BytesMut;
-use calcite_protocol::{LoginStart, ProtocolError, decode_frame, parse_login_start, read_var_i32};
+use calcite_protocol::{
+    LoginStart, ProtocolError, decode_frame, encode_login_success, parse_login_acknowledged,
+    parse_login_start, read_var_i32,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionState {
@@ -80,8 +83,19 @@ impl Connection {
         Ok(parse_login_start(payload)?)
     }
 
-    pub fn login_success(&self, _login: &LoginStart) -> Result<(), ConnectionError> {
-        Err(ConnectionError::OfflineUuidUnavailable)
+    pub fn login_success(&self, login: &LoginStart) -> Result<Vec<u8>, ConnectionError> {
+        encode_login_success(login).map_err(ConnectionError::Protocol)
+    }
+
+    pub fn acknowledge_login(&mut self, payload: &[u8]) -> Result<(), ConnectionError> {
+        if self.state != ConnectionState::Login {
+            return Err(ConnectionError::InvalidTransition {
+                from: self.state,
+                to: ConnectionState::Login,
+            });
+        }
+        parse_login_acknowledged(payload).map_err(ConnectionError::Protocol)?;
+        self.transition(ConnectionState::Configuration)
     }
 }
 
@@ -148,7 +162,7 @@ mod tests {
     }
 
     #[test]
-    fn login_start_is_parsed_but_success_remains_blocked() {
+    fn login_start_and_success_are_supported() {
         let mut connection = Connection::new();
         connection.transition(ConnectionState::Login).unwrap();
         let mut payload = vec![0, 5];
@@ -156,11 +170,10 @@ mod tests {
         payload.extend_from_slice(&[7; 16]);
         let login = connection.parse_login_start(&payload).unwrap();
         assert_eq!(login.name, "Steve");
-        assert_eq!(
-            connection.login_success(&login),
-            Err(ConnectionError::OfflineUuidUnavailable)
-        );
-        assert_eq!(connection.state(), ConnectionState::Login);
+        let success = connection.login_success(&login).unwrap();
+        assert_eq!(success[0], 0x02);
+        assert_eq!(connection.acknowledge_login(&[0x03]), Ok(()));
+        assert_eq!(connection.state(), ConnectionState::Configuration);
     }
 
     #[test]

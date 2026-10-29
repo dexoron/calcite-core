@@ -440,17 +440,26 @@ mod tests {
     fn offline_uuid_matches_cpp_vector() {
         assert_eq!(
             derive_offline_uuid("Steve").unwrap(),
-            [0x56, 0x27, 0xdd, 0x98, 0xe6, 0xbe, 0x3c, 0x21, 0xb8, 0xa8, 0xe9, 0x23, 0x44, 0x18, 0x36, 0x41]
+            [
+                0x56, 0x27, 0xdd, 0x98, 0xe6, 0xbe, 0x3c, 0x21, 0xb8, 0xa8, 0xe9, 0x23, 0x44, 0x18,
+                0x36, 0x41
+            ]
         );
     }
 
     #[test]
     fn login_success_and_acknowledged_are_encoded() {
-        let login = LoginStart { name: "Steve".into(), client_uuid: [0; 16] };
+        let login = LoginStart {
+            name: "Steve".into(),
+            client_uuid: [0; 16],
+        };
         let success = encode_login_success(&login).unwrap();
         assert_eq!(success[0], 0x02);
         assert_eq!(&success[1..17], &derive_offline_uuid("Steve").unwrap());
         assert_eq!(parse_login_acknowledged(&[0x03]), Ok(()));
-        assert_eq!(parse_login_acknowledged(&[0x03, 0]), Err(ProtocolError::InvalidLoginAcknowledged));
+        assert_eq!(
+            parse_login_acknowledged(&[0x03, 0]),
+            Err(ProtocolError::InvalidLoginAcknowledged)
+        );
     }
 }
