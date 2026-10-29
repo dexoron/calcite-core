@@ -5,6 +5,8 @@ use md5::{Digest, Md5};
 
 pub const PROTOCOL_VERSION: i32 = 775;
 pub const MINECRAFT_VERSION: &str = "26.1.2";
+pub const PLAY_SERVERBOUND_KEEP_ALIVE_PACKET_ID: i32 = 0x1C;
+pub const PLAY_CLIENTBOUND_KEEP_ALIVE_PACKET_ID: i32 = 0x2C;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ProtocolError {
@@ -38,6 +40,12 @@ pub enum ProtocolError {
     OfflineUuidUnavailable,
     #[error("login acknowledged packet is malformed")]
     InvalidLoginAcknowledged,
+    #[error("invalid play packet id {0}")]
+    InvalidPlayPacketId(i32),
+    #[error("play keep-alive payload is malformed")]
+    InvalidPlayKeepAlive,
+    #[error("play keep-alive payload does not match the pending challenge")]
+    KeepAlivePayloadMismatch,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +67,38 @@ pub struct Handshake {
 pub struct LoginStart {
     pub name: String,
     pub client_uuid: [u8; 16],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ServerboundKeepAlive {
+    pub payload: u64,
+}
+
+/// Parse the protocol-775 Play serverbound Keep Alive packet.
+/// The C++ oracle routes packet id 0x1C and reads one big-endian u64.
+pub fn parse_play_serverbound_keep_alive(
+    mut payload: &[u8],
+) -> Result<ServerboundKeepAlive, ProtocolError> {
+    let packet_id = read_var_i32(&mut payload)?;
+    if packet_id != PLAY_SERVERBOUND_KEEP_ALIVE_PACKET_ID {
+        return Err(ProtocolError::InvalidPlayPacketId(packet_id));
+    }
+    if payload.len() != 8 {
+        return Err(ProtocolError::InvalidPlayKeepAlive);
+    }
+    let mut bytes = [0u8; 8];
+    bytes.copy_from_slice(payload);
+    Ok(ServerboundKeepAlive {
+        payload: u64::from_be_bytes(bytes),
+    })
+}
+
+/// Encode the protocol-775 Play clientbound Keep Alive packet.
+pub fn encode_play_clientbound_keep_alive(payload: u64) -> Vec<u8> {
+    let mut encoded = Vec::with_capacity(9);
+    write_var_i32(PLAY_CLIENTBOUND_KEEP_ALIVE_PACKET_ID, &mut encoded);
+    encoded.extend_from_slice(&payload.to_be_bytes());
+    encoded
 }
 
 /// Parse the protocol-775 Login Start payload. Offline UUID derivation is
@@ -497,5 +537,38 @@ mod tests {
         let decoded = decode_frame(&mut input).unwrap().unwrap();
         assert_eq!(decoded.as_ref(), &packet[1..15]);
         assert_eq!(input.as_ref(), &packet[15..]);
+    }
+
+    #[test]
+    fn play_keep_alive_matches_cpp_ids_and_big_endian_layout() {
+        let payload = 0x0102_0304_0506_0708u64;
+        let encoded = encode_play_clientbound_keep_alive(payload);
+        assert_eq!(encoded, vec![0x2c, 1, 2, 3, 4, 5, 6, 7, 8]);
+
+        let mut serverbound = vec![0x1c];
+        serverbound.extend_from_slice(&payload.to_be_bytes());
+        assert_eq!(
+            parse_play_serverbound_keep_alive(&serverbound),
+            Ok(ServerboundKeepAlive { payload })
+        );
+    }
+
+    #[test]
+    fn play_keep_alive_rejects_malformed_payloads() {
+        assert_eq!(
+            parse_play_serverbound_keep_alive(&[0x1b, 0, 0, 0, 0, 0, 0, 0, 1]),
+            Err(ProtocolError::InvalidPlayPacketId(0x1b))
+        );
+        assert_eq!(
+            parse_play_serverbound_keep_alive(&[0x1c, 0, 0]),
+            Err(ProtocolError::InvalidPlayKeepAlive)
+        );
+        let mut trailing = vec![0x1c];
+        trailing.extend_from_slice(&1u64.to_be_bytes());
+        trailing.push(0);
+        assert_eq!(
+            parse_play_serverbound_keep_alive(&trailing),
+            Err(ProtocolError::InvalidPlayKeepAlive)
+        );
     }
 }
