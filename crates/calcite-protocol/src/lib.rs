@@ -1,6 +1,7 @@
 //! Minecraft protocol primitives for the protocol-775 migration target.
 
 use bytes::{BufMut, BytesMut};
+use md5::{Digest, Md5};
 
 pub const PROTOCOL_VERSION: i32 = 775;
 pub const MINECRAFT_VERSION: &str = "26.1.2";
@@ -35,6 +36,8 @@ pub enum ProtocolError {
     InvalidPlayerNameEncoding,
     #[error("login UUID derivation is unavailable until a vetted crypto dependency is selected")]
     OfflineUuidUnavailable,
+    #[error("login acknowledged packet is malformed")]
+    InvalidLoginAcknowledged,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -89,7 +92,30 @@ pub fn parse_login_start(mut payload: &[u8]) -> Result<LoginStart, ProtocolError
 }
 
 pub fn derive_offline_uuid(_name: &str) -> Result<[u8; 16], ProtocolError> {
-    Err(ProtocolError::OfflineUuidUnavailable)
+    let mut hasher = Md5::new();
+    hasher.update(b"OfflinePlayer:");
+    hasher.update(_name.as_bytes());
+    let mut uuid: [u8; 16] = hasher.finalize().into();
+    uuid[6] = (uuid[6] & 0x0f) | 0x30;
+    uuid[8] = (uuid[8] & 0x3f) | 0x80;
+    Ok(uuid)
+}
+
+pub fn encode_login_success(login: &LoginStart) -> Result<Vec<u8>, ProtocolError> {
+    let uuid = derive_offline_uuid(&login.name)?;
+    let mut payload = vec![0x02];
+    payload.extend_from_slice(&uuid);
+    write_string(&login.name, &mut payload)?;
+    write_var_i32(0, &mut payload);
+    Ok(payload)
+}
+
+pub fn parse_login_acknowledged(payload: &[u8]) -> Result<(), ProtocolError> {
+    if payload == [0x03] {
+        Ok(())
+    } else {
+        Err(ProtocolError::InvalidLoginAcknowledged)
+    }
 }
 
 /// Decode the uncompressed handshake payload (packet id through next-state).
@@ -355,6 +381,32 @@ mod tests {
     }
 
     #[test]
+    fn login_start_wire_fixture_matches_cpp_layout() {
+        let payload = login_bytes(b"Steve", [0; 16]);
+        let mut frame = vec![0x17];
+        frame.extend_from_slice(&payload);
+        assert_eq!(
+            &frame[..8],
+            &[0x17, 0x00, 0x05, b'S', b't', b'e', b'v', b'e']
+        );
+        assert_eq!(frame.len(), 24);
+        assert!(frame[8..].iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn login_success_and_acknowledged_wire_fixtures_match_cpp_layout() {
+        let offline_uuid = [
+            0x56, 0x27, 0xdd, 0x98, 0xe6, 0xbe, 0x3c, 0x21, 0xb8, 0xa8, 0xe9, 0x23, 0x44, 0x18,
+            0x36, 0x41,
+        ];
+        let mut success = vec![0x02];
+        success.extend_from_slice(&offline_uuid);
+        success.extend_from_slice(&[0x05, b'S', b't', b'e', b'v', b'e', 0x00]);
+        assert_eq!(encode_frame(&success).unwrap().as_ref()[..2], [0x18, 0x02]);
+        assert_eq!(encode_frame(&[0x03]).unwrap().as_ref(), &[0x01, 0x03]);
+    }
+
+    #[test]
     fn rejects_malformed_login_start() {
         assert_eq!(
             parse_login_start(&[0, 0]),
@@ -385,10 +437,20 @@ mod tests {
     }
 
     #[test]
-    fn offline_uuid_requires_vetted_crypto_dependency() {
+    fn offline_uuid_matches_cpp_vector() {
         assert_eq!(
-            derive_offline_uuid("Steve"),
-            Err(ProtocolError::OfflineUuidUnavailable)
+            derive_offline_uuid("Steve").unwrap(),
+            [0x56, 0x27, 0xdd, 0x98, 0xe6, 0xbe, 0x3c, 0x21, 0xb8, 0xa8, 0xe9, 0x23, 0x44, 0x18, 0x36, 0x41]
         );
+    }
+
+    #[test]
+    fn login_success_and_acknowledged_are_encoded() {
+        let login = LoginStart { name: "Steve".into(), client_uuid: [0; 16] };
+        let success = encode_login_success(&login).unwrap();
+        assert_eq!(success[0], 0x02);
+        assert_eq!(&success[1..17], &derive_offline_uuid("Steve").unwrap());
+        assert_eq!(parse_login_acknowledged(&[0x03]), Ok(()));
+        assert_eq!(parse_login_acknowledged(&[0x03, 0]), Err(ProtocolError::InvalidLoginAcknowledged));
     }
 }
