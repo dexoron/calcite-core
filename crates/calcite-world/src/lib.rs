@@ -47,6 +47,54 @@ impl Chunk {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ChunkRegistryError {
+    CapacityExceeded,
+}
+
+/// Deterministic bounded collection of loaded chunks.
+pub struct ChunkRegistry {
+    chunks: Vec<Chunk>,
+    capacity: usize,
+}
+
+impl ChunkRegistry {
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            chunks: Vec::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.chunks.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.chunks.is_empty()
+    }
+
+    pub fn get(&self, position: ChunkPos) -> Option<&Chunk> {
+        self.chunks.iter().find(|chunk| chunk.position == position)
+    }
+
+    pub fn get_or_create(&mut self, position: ChunkPos) -> Result<&mut Chunk, ChunkRegistryError> {
+        if let Some(index) = self
+            .chunks
+            .iter()
+            .position(|chunk| chunk.position == position)
+        {
+            return Ok(&mut self.chunks[index]);
+        }
+        if self.chunks.len() == self.capacity {
+            return Err(ChunkRegistryError::CapacityExceeded);
+        }
+        self.chunks.push(Chunk::new(position));
+        let index = self.chunks.len() - 1;
+        Ok(&mut self.chunks[index])
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,5 +183,73 @@ mod tests {
         );
         assert_eq!(chunk.local_block_index(16, 12, 0), None);
         assert_eq!(chunk.local_block_index(0, MAX_Y, 0), None);
+    }
+
+    #[test]
+    fn registry_reuses_same_position_without_consuming_capacity() {
+        let mut registry = ChunkRegistry::with_capacity(1);
+        let position = ChunkPos { x: -2, z: 3 };
+        registry.get_or_create(position).unwrap().set_block(
+            BlockPos {
+                x: -17,
+                y: 0,
+                z: 63,
+            },
+            42,
+        );
+        assert_eq!(registry.len(), 1);
+        assert_eq!(
+            registry.get_or_create(position).unwrap().block(BlockPos {
+                x: -17,
+                y: 0,
+                z: 63
+            }),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn registry_keeps_negative_and_adjacent_positions_distinct() {
+        let mut registry = ChunkRegistry::with_capacity(2);
+        let first = ChunkPos { x: -1, z: -1 };
+        let adjacent = ChunkPos { x: 0, z: -1 };
+        registry.get_or_create(first).unwrap().set_block(
+            BlockPos {
+                x: -16,
+                y: 0,
+                z: -16,
+            },
+            7,
+        );
+        registry
+            .get_or_create(adjacent)
+            .unwrap()
+            .set_block(BlockPos { x: 0, y: 0, z: -16 }, 9);
+        assert_eq!(registry.len(), 2);
+        assert_eq!(
+            registry.get(first).unwrap().block(BlockPos {
+                x: -16,
+                y: 0,
+                z: -16
+            }),
+            Some(7)
+        );
+        assert_eq!(
+            registry
+                .get(adjacent)
+                .unwrap()
+                .block(BlockPos { x: 0, y: 0, z: -16 }),
+            Some(9)
+        );
+    }
+
+    #[test]
+    fn registry_rejects_new_chunks_at_capacity() {
+        let mut registry = ChunkRegistry::with_capacity(1);
+        registry.get_or_create(ChunkPos { x: 0, z: 0 }).unwrap();
+        assert!(matches!(
+            registry.get_or_create(ChunkPos { x: 1, z: 0 }),
+            Err(ChunkRegistryError::CapacityExceeded)
+        ));
     }
 }
