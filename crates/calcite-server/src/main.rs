@@ -6,6 +6,80 @@ use tokio::net::{TcpListener, TcpStream};
 
 const DEFAULT_MAX_FRAME: usize = 2 * 1024 * 1024;
 
+const CONFIGURATION_FIXTURES: [&[u8]; 30] = [
+    include_bytes!("../../../docs/configuration/packet-0"),
+    include_bytes!("../../../docs/configuration/packet-1"),
+    include_bytes!("../../../docs/configuration/packet-2"),
+    include_bytes!("../../../docs/configuration/packet-3"),
+    include_bytes!("../../../docs/configuration/packet-4"),
+    include_bytes!("../../../docs/configuration/packet-5"),
+    include_bytes!("../../../docs/configuration/packet-6"),
+    include_bytes!("../../../docs/configuration/packet-7"),
+    include_bytes!("../../../docs/configuration/packet-8"),
+    include_bytes!("../../../docs/configuration/packet-9"),
+    include_bytes!("../../../docs/configuration/packet-10"),
+    include_bytes!("../../../docs/configuration/packet-11"),
+    include_bytes!("../../../docs/configuration/packet-12"),
+    include_bytes!("../../../docs/configuration/packet-13"),
+    include_bytes!("../../../docs/configuration/packet-14"),
+    include_bytes!("../../../docs/configuration/packet-15"),
+    include_bytes!("../../../docs/configuration/packet-16"),
+    include_bytes!("../../../docs/configuration/packet-17"),
+    include_bytes!("../../../docs/configuration/packet-18"),
+    include_bytes!("../../../docs/configuration/packet-19"),
+    include_bytes!("../../../docs/configuration/packet-20"),
+    include_bytes!("../../../docs/configuration/packet-21"),
+    include_bytes!("../../../docs/configuration/packet-22"),
+    include_bytes!("../../../docs/configuration/packet-23"),
+    include_bytes!("../../../docs/configuration/packet-24"),
+    include_bytes!("../../../docs/configuration/packet-25"),
+    include_bytes!("../../../docs/configuration/packet-26"),
+    include_bytes!("../../../docs/configuration/packet-27"),
+    include_bytes!("../../../docs/configuration/packet-28"),
+    include_bytes!("../../../docs/configuration/packet-29"),
+];
+
+pub fn configuration_fixture_stream() -> &'static [&'static [u8]] {
+    &CONFIGURATION_FIXTURES
+}
+
+async fn run_configuration(
+    mut socket: TcpStream,
+    mut connection: Connection,
+    max_frame: usize,
+) -> Result<Connection> {
+    if connection.state() != ConnectionState::Configuration {
+        anyhow::bail!("configuration requires Configuration state");
+    }
+    for fixture in CONFIGURATION_FIXTURES {
+        socket
+            .write_all(&encode_frame(fixture)?)
+            .await
+            .context("write configuration fixture")?;
+    }
+    socket
+        .write_all(&encode_frame(&connection.configuration_finish_packet()?)?)
+        .await
+        .context("write finish configuration")?;
+    let mut decoder = FrameDecoder::new(max_frame);
+    let mut read_buf = [0_u8; 1024];
+    loop {
+        let count = socket
+            .read(&mut read_buf)
+            .await
+            .context("read configuration acknowledgement")?;
+        if count == 0 {
+            anyhow::bail!("connection closed before configuration acknowledgement");
+        }
+        for frame in decoder.push(&read_buf[..count])? {
+            connection
+                .acknowledge_configuration(&frame)
+                .map_err(|error| anyhow::anyhow!(error))?;
+            return Ok(connection);
+        }
+    }
+}
+
 pub async fn serve(listener: TcpListener, max_frame: usize) -> Result<()> {
     loop {
         let (socket, peer) = listener.accept().await.context("accept TCP connection")?;
@@ -173,6 +247,48 @@ mod tests {
         let mut client = TcpStream::connect(address).await.unwrap();
         client
             .write_all(&encode_frame(&[1]).unwrap())
+            .await
+            .unwrap();
+        let mut buf = [0_u8; 1];
+        assert_eq!(client.read(&mut buf).await.unwrap(), 0);
+        assert!(server.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn malformed_status_ack_packet_closes_connection() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            handle_connection(socket, 1024).await.is_err()
+        });
+        let mut client = TcpStream::connect(address).await.unwrap();
+        client
+            .write_all(&encode_frame(&handshake()).unwrap())
+            .await
+            .unwrap();
+        client
+            .write_all(&encode_frame(&[0x03]).unwrap())
+            .await
+            .unwrap();
+        let mut buf = [0_u8; 1];
+        assert_eq!(client.read(&mut buf).await.unwrap(), 0);
+        assert!(server.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn login_handshake_is_rejected_until_configuration_exists() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            handle_connection(socket, 1024).await.is_err()
+        });
+        let mut client = TcpStream::connect(address).await.unwrap();
+        let mut login_handshake = handshake();
+        *login_handshake.last_mut().unwrap() = 2;
+        client
+            .write_all(&encode_frame(&login_handshake).unwrap())
             .await
             .unwrap();
         let mut buf = [0_u8; 1];
