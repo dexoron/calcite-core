@@ -25,7 +25,16 @@ impl Chunk {
         if !(MIN_Y..MAX_Y).contains(&pos.y) || !(0..16).contains(&x) || !(0..16).contains(&z) {
             return None;
         }
-        let y = (pos.y - MIN_Y) as usize;
+        self.local_block_index(x as u8, pos.y, z as u8)
+    }
+
+    /// Returns the dense storage index for a chunk-local X/Z coordinate.
+    /// The local coordinates must be in `0..16`; Y uses the world range.
+    pub fn local_block_index(&self, x: u8, y: i32, z: u8) -> Option<usize> {
+        if x >= 16 || z >= 16 || !(MIN_Y..MAX_Y).contains(&y) {
+            return None;
+        }
+        let y = (y - MIN_Y) as usize;
         Some((y * 256) + (z as usize * 16) + x as usize)
     }
     pub fn set_block(&mut self, pos: BlockPos, state: u32) -> bool {
@@ -110,5 +119,21 @@ mod tests {
 
         assert!(chunk.set_block(edge, 99));
         assert_eq!(chunk.block(BlockPos { x: 16, ..edge }), None);
+    }
+
+    #[test]
+    fn local_index_matches_global_index() {
+        let chunk = Chunk::new(ChunkPos { x: -2, z: 3 });
+        let global = BlockPos {
+            x: -17,
+            y: 12,
+            z: 63,
+        };
+        assert_eq!(
+            chunk.block_index(global),
+            chunk.local_block_index(15, global.y, 15)
+        );
+        assert_eq!(chunk.local_block_index(16, 12, 0), None);
+        assert_eq!(chunk.local_block_index(0, MAX_Y, 0), None);
     }
 }
