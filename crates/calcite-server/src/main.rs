@@ -43,9 +43,9 @@ pub fn configuration_fixture_stream() -> &'static [&'static [u8]] {
     &CONFIGURATION_FIXTURES
 }
 
-async fn run_configuration(
+pub async fn run_configuration(
     mut socket: TcpStream,
-    mut connection: Connection,
+    connection: Connection,
     max_frame: usize,
 ) -> Result<Connection> {
     if connection.state() != ConnectionState::Configuration {
@@ -71,9 +71,9 @@ async fn run_configuration(
         if count == 0 {
             anyhow::bail!("connection closed before configuration acknowledgement");
         }
-        for frame in decoder.push(&read_buf[..count])? {
+        if let Some(frame) = decoder.push(&read_buf[..count])?.first() {
             connection
-                .acknowledge_configuration(&frame)
+                .validate_configuration_ack(frame)
                 .map_err(|error| anyhow::anyhow!(error))?;
             return Ok(connection);
         }
@@ -111,14 +111,47 @@ async fn handle_connection(mut socket: TcpStream, max_frame: usize) -> Result<()
         {
             if !handshake_done {
                 let handshake = parse_handshake(&frame).context("parse handshake")?;
-                if handshake.intent != HandshakeIntent::Status {
-                    anyhow::bail!("login and transfer are not implemented");
+                match handshake.intent {
+                    HandshakeIntent::Status => connection
+                        .transition(ConnectionState::Status)
+                        .context("enter status state")?,
+                    HandshakeIntent::Login => connection
+                        .transition(ConnectionState::Login)
+                        .context("enter login state")?,
+                    HandshakeIntent::Transfer => anyhow::bail!("transfer is not implemented"),
                 }
-                connection
-                    .transition(ConnectionState::Status)
-                    .context("enter status state")?;
                 handshake_done = true;
                 continue;
+            }
+            if connection.state() == ConnectionState::Login {
+                let login = connection
+                    .parse_login_start(&frame)
+                    .context("parse login start")?;
+                socket
+                    .write_all(&encode_frame(&connection.login_success(&login)?)?)
+                    .await
+                    .context("write login success")?;
+                loop {
+                    let count = socket
+                        .read(&mut read_buf)
+                        .await
+                        .context("read login acknowledgement")?;
+                    if count == 0 {
+                        anyhow::bail!("connection closed before login acknowledgement");
+                    }
+                    let frames = decoder
+                        .push(&read_buf[..count])
+                        .context("decode login acknowledgement")?;
+                    if let Some(ack) = frames.first() {
+                        connection
+                            .acknowledge_login(ack)
+                            .context("acknowledge login")?;
+                        break;
+                    }
+                }
+                return run_configuration(socket, connection, max_frame)
+                    .await
+                    .map(|_| ());
             }
             if connection.state() != ConnectionState::Status {
                 anyhow::bail!("unexpected connection state");
@@ -277,7 +310,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn login_handshake_is_rejected_until_configuration_exists() {
+    async fn transfer_handshake_is_rejected() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -286,7 +319,7 @@ mod tests {
         });
         let mut client = TcpStream::connect(address).await.unwrap();
         let mut login_handshake = handshake();
-        *login_handshake.last_mut().unwrap() = 2;
+        *login_handshake.last_mut().unwrap() = 3;
         client
             .write_all(&encode_frame(&login_handshake).unwrap())
             .await

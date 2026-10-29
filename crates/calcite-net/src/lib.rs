@@ -121,6 +121,16 @@ impl Connection {
             to: ConnectionState::Play,
         })
     }
+
+    pub fn validate_configuration_ack(&self, payload: &[u8]) -> Result<(), ConnectionError> {
+        if self.state != ConnectionState::Configuration {
+            return Err(ConnectionError::InvalidTransition {
+                from: self.state,
+                to: ConnectionState::Configuration,
+            });
+        }
+        parse_configuration_acknowledged(payload).map_err(ConnectionError::Protocol)
+    }
 }
 
 pub struct FrameDecoder {
