@@ -31,6 +31,8 @@ pub enum ProtocolError {
     InvalidLoginPacketId(i32),
     #[error("player name must contain between 1 and 16 bytes")]
     InvalidPlayerName,
+    #[error("player name is not valid UTF-8")]
+    InvalidPlayerNameEncoding,
     #[error("login UUID derivation is unavailable until a vetted crypto dependency is selected")]
     OfflineUuidUnavailable,
 }
@@ -74,7 +76,7 @@ pub fn parse_login_start(mut payload: &[u8]) -> Result<LoginStart, ProtocolError
         return Err(ProtocolError::Truncated);
     }
     let name = std::str::from_utf8(&payload[..name_len])
-        .map_err(|_| ProtocolError::InvalidServerAddress)?
+        .map_err(|_| ProtocolError::InvalidPlayerNameEncoding)?
         .to_owned();
     payload = &payload[name_len..];
     let mut client_uuid = [0u8; 16];
@@ -371,6 +373,14 @@ mod tests {
         assert_eq!(
             parse_login_start(&trailing),
             Err(ProtocolError::TrailingData)
+        );
+    }
+
+    #[test]
+    fn rejects_login_name_with_invalid_utf8() {
+        assert_eq!(
+            parse_login_start(&login_bytes(&[0xff], [0; 16])),
+            Err(ProtocolError::InvalidPlayerNameEncoding)
         );
     }
 
