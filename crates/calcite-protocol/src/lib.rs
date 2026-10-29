@@ -118,6 +118,18 @@ pub fn parse_login_acknowledged(payload: &[u8]) -> Result<(), ProtocolError> {
     }
 }
 
+pub fn encode_configuration_finish() -> Vec<u8> {
+    vec![0x03]
+}
+
+pub fn parse_configuration_acknowledged(payload: &[u8]) -> Result<(), ProtocolError> {
+    if payload == [0x03] {
+        Ok(())
+    } else {
+        Err(ProtocolError::InvalidLoginAcknowledged)
+    }
+}
+
 /// Decode the uncompressed handshake payload (packet id through next-state).
 /// Protocol 775 is intentionally enforced so packet layouts from other
 /// Minecraft versions cannot silently enter the state machine.
@@ -461,5 +473,29 @@ mod tests {
             parse_login_acknowledged(&[0x03, 0]),
             Err(ProtocolError::InvalidLoginAcknowledged)
         );
+    }
+
+    #[test]
+    fn login_acknowledged_rejects_empty_and_wrong_packet_ids() {
+        assert_eq!(
+            parse_login_acknowledged(&[]),
+            Err(ProtocolError::InvalidLoginAcknowledged)
+        );
+        assert_eq!(
+            parse_login_acknowledged(&[0x02]),
+            Err(ProtocolError::InvalidLoginAcknowledged)
+        );
+    }
+
+    #[test]
+    fn configuration_registry_fixture_has_expected_packet_header() {
+        let packet = [
+            0x0e, 0x01, 0x09, b'm', b'i', b'n', b'e', b'c', b'r', b'a', b'f', b't', 0x04, b'c',
+            b'o', b'r', b'e', 0x06, b'2', b'6', b'.', b'1', b'.', b'2',
+        ];
+        let mut input = bytes::BytesMut::from(&packet[..]);
+        let decoded = decode_frame(&mut input).unwrap().unwrap();
+        assert_eq!(decoded.as_ref(), &packet[1..15]);
+        assert_eq!(input.as_ref(), &packet[15..]);
     }
 }
