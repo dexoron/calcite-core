@@ -1,45 +1,45 @@
-# ActualKlasterKraft
+# Calcite Core
 
-Minecraft Java Edition server implementation in C++.
+High-performance Minecraft Java Edition server core written in Rust.
+The Rust rewrite targets behavioral compatibility with the legacy oracle while
+building a smaller, typed, testable implementation.
 
-Calcite is migrating this C++ implementation to an idiomatic Rust 2024
-workspace; the C++ tree remains the behavioral oracle on branch
-`perepisyvanie-na-rust`.
+## Rust workspace
 
-## Architectural Choices
+The repository uses Rust 2024, Cargo, and a workspace split by responsibility:
 
-- Modern C++23 and Boost
-- Heavy usage of coroutines (preventing callback hell and explicit FSMs)
-- C++ modules, not headers/TUs
-- Less heap allocations, more pools, arenas and stack
+- `calcite-core` - shared positions, UUIDs, and domain errors.
+- `calcite-protocol` - protocol 775 (`Minecraft 26.1.2`) primitives,
+  handshake parsing, VarInt encoding, and packet framing.
+- `calcite-net` - incremental TCP frame decoding and transport boundaries.
+- `calcite-entity` - player state and bounded player-pool foundation.
+- `calcite-world` - chunk storage, world-height bounds, and coordinate mapping.
+- `calcite-server` - Tokio listener and connection lifecycle.
 
-## Dependencies 
+## Current status
 
-- GCC or Clang supporting C++23
-- Boost
-- CMake 3.30+
-- OpenSSL
+Implemented:
 
-## Status
+- Status request, Server List Ping, and Pong handling.
+- Partial TCP reads with bounded VarInt packet framing.
+- Protocol-775 handshake validation and malformed-input errors.
+- Initial chunk indexing and player-pool capacity/slot reuse invariants.
 
-The server responds Server List Pings, i.e. shows information about self in the server list.
+Incomplete:
 
-You're spawned in a world with only one chunk which looks like a stack of Air and Grass Block 16\*16\*16 cubes.
+- Login, Configuration, and Play state machines.
+- Compression, encryption, and verified live-client compatibility.
+- Persistent worlds, complete chunk/light/block-entity serialization, and
+  synchronized gameplay state.
 
-You're in Creative Mode, you can fly and break blocks. You can also cheat items into your inventory (since you're in Creative Mode) and place blocks.
+## Build and checks
 
-You can see how other player move around and see their and your chat messages. Blocks and items are not synchronised.
+```powershell
+cargo build --workspace
+cargo test --workspace
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo run -p calcite-server
+```
 
-## Rust migration / Миграция на Rust
-
-Implemented / Реализовано: Cargo workspace; protocol 775 (`26.1.2`) handshake,
-VarInt framing, status ping/pong with partial reads; initial chunk indexing and
-player-pool invariants.
-
-Incomplete / Не реализовано: full Login/Configuration/Play, compression,
-encryption, live-client compatibility, persistent worlds, complete chunk data,
-and synchronized gameplay. The C++ tree remains the compatibility reference.
-
-Checks / Проверки: `cargo test --workspace`; `cargo fmt --all -- --check`;
-`cargo clippy --workspace --all-targets -- -D warnings`; run with
-`cargo run -p calcite-server`.
+The active rewrite branch is `rewrite/rust-migration`.
