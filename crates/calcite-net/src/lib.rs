@@ -1,7 +1,7 @@
 use bytes::BytesMut;
 use calcite_protocol::{
-    LoginStart, ProtocolError, decode_frame, encode_login_success, parse_login_acknowledged,
-    parse_login_start, read_var_i32,
+    LoginStart, ProtocolError, decode_frame, encode_login_success,
+    parse_configuration_acknowledged, parse_login_acknowledged, parse_login_start, read_var_i32,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +97,30 @@ impl Connection {
         parse_login_acknowledged(payload).map_err(ConnectionError::Protocol)?;
         self.transition(ConnectionState::Configuration)
     }
+
+    pub fn configuration_finish_packet(&self) -> Result<Vec<u8>, ConnectionError> {
+        if self.state != ConnectionState::Configuration {
+            return Err(ConnectionError::InvalidTransition {
+                from: self.state,
+                to: ConnectionState::Configuration,
+            });
+        }
+        Ok(calcite_protocol::encode_configuration_finish())
+    }
+
+    pub fn acknowledge_configuration(&mut self, payload: &[u8]) -> Result<(), ConnectionError> {
+        if self.state != ConnectionState::Configuration {
+            return Err(ConnectionError::InvalidTransition {
+                from: self.state,
+                to: ConnectionState::Configuration,
+            });
+        }
+        parse_configuration_acknowledged(payload).map_err(ConnectionError::Protocol)?;
+        Err(ConnectionError::InvalidTransition {
+            from: ConnectionState::Configuration,
+            to: ConnectionState::Play,
+        })
+    }
 }
 
 pub struct FrameDecoder {
@@ -173,6 +197,15 @@ mod tests {
         let success = connection.login_success(&login).unwrap();
         assert_eq!(success[0], 0x02);
         assert_eq!(connection.acknowledge_login(&[0x03]), Ok(()));
+        assert_eq!(connection.state(), ConnectionState::Configuration);
+        assert_eq!(
+            connection.configuration_finish_packet().unwrap(),
+            vec![0x03]
+        );
+        assert!(matches!(
+            connection.acknowledge_configuration(&[0x03]),
+            Err(ConnectionError::InvalidTransition { .. })
+        ));
         assert_eq!(connection.state(), ConnectionState::Configuration);
     }
 
