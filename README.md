@@ -23,11 +23,16 @@ Implemented:
 - Status request, Server List Ping, and Pong handling.
 - Partial TCP reads with bounded VarInt packet framing.
 - Protocol-775 handshake validation and malformed-input errors.
+- Offline-mode Login, Configuration fixture stream with strict Client
+  Information parsing, and transition to Play.
+- Minimal Play session: Keep Alive scheduling, reply correlation, timeout
+  and Disconnect packets.
 - Initial chunk indexing and player-pool capacity/slot reuse invariants.
 
 Incomplete:
 
-- Login, Configuration, and Play state machines.
+- Play gameplay packets (Login (play), position sync, chunks, chat, player
+  list); a real client does not spawn yet.
 - Compression, encryption, and verified live-client compatibility.
 - Persistent worlds, complete chunk/light/block-entity serialization, and
   synchronized gameplay state.
