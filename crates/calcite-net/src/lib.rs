@@ -1,8 +1,8 @@
 use bytes::BytesMut;
 use calcite_protocol::{
-    LoginStart, ProtocolError, ServerboundKeepAlive, decode_frame, encode_login_success,
-    parse_configuration_acknowledged, parse_login_acknowledged, parse_login_start,
-    parse_play_serverbound_keep_alive, read_var_i32,
+    ClientInformation, LoginStart, ProtocolError, ServerboundKeepAlive, decode_frame,
+    encode_login_success, parse_configuration_acknowledged, parse_configuration_client_information,
+    parse_login_acknowledged, parse_login_start, parse_play_serverbound_keep_alive, read_var_i32,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +26,8 @@ pub enum ConnectionError {
     Protocol(#[from] ProtocolError),
     #[error("offline UUID derivation is unavailable; Login Success is not emitted")]
     OfflineUuidUnavailable,
+    #[error(transparent)]
+    KeepAlive(#[from] KeepAliveError),
 }
 
 impl ConnectionState {
@@ -120,6 +122,20 @@ impl Connection {
         self.transition(ConnectionState::Play)
     }
 
+    /// Parse serverbound Client Information while in Configuration.
+    pub fn parse_client_information(
+        &self,
+        payload: &[u8],
+    ) -> Result<ClientInformation, ConnectionError> {
+        if self.state != ConnectionState::Configuration {
+            return Err(ConnectionError::InvalidTransition {
+                from: self.state,
+                to: ConnectionState::Configuration,
+            });
+        }
+        Ok(parse_configuration_client_information(payload)?)
+    }
+
     pub fn validate_configuration_ack(&self, payload: &[u8]) -> Result<(), ConnectionError> {
         if self.state != ConnectionState::Configuration {
             return Err(ConnectionError::InvalidTransition {
@@ -151,6 +167,135 @@ impl Connection {
             ));
         }
         Ok(keep_alive)
+    }
+
+    /// Validate a serverbound Keep Alive against every pending challenge of
+    /// `tracker`, as the C++ oracle does with its `active_payloads` slots.
+    pub fn handle_play_keep_alive_reply(
+        &self,
+        payload: &[u8],
+        tracker: &mut KeepAliveTracker,
+    ) -> Result<ServerboundKeepAlive, ConnectionError> {
+        if self.state != ConnectionState::Play {
+            return Err(ConnectionError::InvalidTransition {
+                from: self.state,
+                to: ConnectionState::Play,
+            });
+        }
+        let keep_alive = parse_play_serverbound_keep_alive(payload)?;
+        tracker.acknowledge(keep_alive.payload)?;
+        Ok(keep_alive)
+    }
+}
+
+/// Maximum number of unanswered Keep Alive challenges kept per connection,
+/// matching the C++ oracle's `active_payloads` array.
+pub const KEEP_ALIVE_SLOTS: usize = 10;
+/// Number of consecutive send ticks without a reply that are tolerated. The
+/// oracle disconnects when `timeout_counter++ > 2`, i.e. on the fourth tick.
+pub const KEEP_ALIVE_MAX_MISSED_TICKS: u32 = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum KeepAliveError {
+    #[error("client did not answer Keep Alive in time")]
+    Timeout,
+    #[error("Keep Alive reply does not match any pending challenge")]
+    CorrelationMismatch,
+}
+
+/// Outstanding Keep Alive challenges of one Play connection.
+///
+/// Invariants: payload `0` is never issued (it marks an empty slot, as in the
+/// oracle) and at most [`KEEP_ALIVE_SLOTS`] challenges are tracked; when all
+/// slots are full the first one is replaced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeepAliveTracker {
+    pending: [u64; KEEP_ALIVE_SLOTS],
+    missed_ticks: u32,
+}
+
+impl Default for KeepAliveTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl KeepAliveTracker {
+    pub const fn new() -> Self {
+        Self {
+            pending: [0; KEEP_ALIVE_SLOTS],
+            missed_ticks: 0,
+        }
+    }
+
+    /// Register a send tick and the challenge sent on it. Fails with
+    /// [`KeepAliveError::Timeout`] once too many ticks passed without a reply;
+    /// in that case no challenge should be sent.
+    /// Returns the payload actually registered, which must be sent to the
+    /// client (`0` is mapped to `1`).
+    pub fn issue(&mut self, payload: u64) -> Result<u64, KeepAliveError> {
+        if self.missed_ticks >= KEEP_ALIVE_MAX_MISSED_TICKS {
+            return Err(KeepAliveError::Timeout);
+        }
+        self.missed_ticks += 1;
+        let payload = payload.max(1);
+        match self.pending.iter_mut().find(|slot| **slot == 0) {
+            Some(slot) => *slot = payload,
+            None => self.pending[0] = payload,
+        }
+        Ok(payload)
+    }
+
+    /// Match a client reply against the pending challenges.
+    pub fn acknowledge(&mut self, payload: u64) -> Result<(), KeepAliveError> {
+        if payload == 0 {
+            return Err(KeepAliveError::CorrelationMismatch);
+        }
+        let slot = self
+            .pending
+            .iter_mut()
+            .find(|slot| **slot == payload)
+            .ok_or(KeepAliveError::CorrelationMismatch)?;
+        *slot = 0;
+        self.missed_ticks = 0;
+        Ok(())
+    }
+
+    pub fn pending_count(&self) -> usize {
+        self.pending.iter().filter(|slot| **slot != 0).count()
+    }
+}
+
+/// Non-cryptographic generator for Keep Alive challenges. The oracle uses
+/// `std::minstd_rand`; challenges only need to be hard to guess by accident,
+/// so a randomly seeded xorshift is sufficient and avoids a new dependency.
+#[derive(Debug, Clone)]
+pub struct KeepAlivePayloads {
+    state: u64,
+}
+
+impl Default for KeepAlivePayloads {
+    fn default() -> Self {
+        use std::hash::{BuildHasher, Hasher};
+        let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+        hasher.write_u64(0x9e37_79b9_7f4a_7c15);
+        Self::with_seed(hasher.finish())
+    }
+}
+
+impl KeepAlivePayloads {
+    pub fn with_seed(seed: u64) -> Self {
+        Self { state: seed.max(1) }
+    }
+
+    /// Next non-zero payload.
+    pub fn next_payload(&mut self) -> u64 {
+        let mut x = self.state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.state = x;
+        x
     }
 }
 
@@ -322,6 +467,99 @@ mod tests {
                 ProtocolError::KeepAlivePayloadMismatch
             ))
         );
+    }
+
+    #[test]
+    fn client_information_requires_configuration_state() {
+        let info = [
+            0x00, 0x05, b'e', b'n', b'_', b'u', b's', 12, 0, 1, 0x7f, 1, 0, 1, 0,
+        ];
+        let mut connection = Connection::new();
+        assert!(matches!(
+            connection.parse_client_information(&info),
+            Err(ConnectionError::InvalidTransition { .. })
+        ));
+        connection.transition(ConnectionState::Login).unwrap();
+        connection
+            .transition(ConnectionState::Configuration)
+            .unwrap();
+        assert_eq!(
+            connection.parse_client_information(&info).unwrap().locale,
+            "en_us"
+        );
+        assert_eq!(
+            connection.parse_client_information(&info[..5]),
+            Err(ConnectionError::Protocol(ProtocolError::Truncated))
+        );
+    }
+
+    #[test]
+    fn keep_alive_tracker_matches_any_pending_challenge_once() {
+        let mut tracker = KeepAliveTracker::new();
+        tracker.issue(11).unwrap();
+        tracker.issue(22).unwrap();
+        assert_eq!(tracker.pending_count(), 2);
+        assert_eq!(tracker.acknowledge(22), Ok(()));
+        assert_eq!(
+            tracker.acknowledge(22),
+            Err(KeepAliveError::CorrelationMismatch)
+        );
+        assert_eq!(tracker.acknowledge(11), Ok(()));
+        assert_eq!(
+            tracker.acknowledge(0),
+            Err(KeepAliveError::CorrelationMismatch)
+        );
+        assert_eq!(tracker.pending_count(), 0);
+    }
+
+    #[test]
+    fn keep_alive_tracker_times_out_after_missed_ticks_and_resets_on_reply() {
+        let mut tracker = KeepAliveTracker::new();
+        for payload in 1..=KEEP_ALIVE_MAX_MISSED_TICKS as u64 {
+            tracker.issue(payload).unwrap();
+        }
+        assert_eq!(tracker.issue(99), Err(KeepAliveError::Timeout));
+
+        let mut tracker = KeepAliveTracker::new();
+        tracker.issue(1).unwrap();
+        tracker.issue(2).unwrap();
+        tracker.acknowledge(1).unwrap();
+        for payload in 3..3 + KEEP_ALIVE_MAX_MISSED_TICKS as u64 {
+            tracker.issue(payload).unwrap();
+        }
+        assert_eq!(tracker.issue(99), Err(KeepAliveError::Timeout));
+    }
+
+    #[test]
+    fn keep_alive_tracker_replaces_first_slot_when_full_and_never_stores_zero() {
+        let mut tracker = KeepAliveTracker::new();
+        for payload in 1..=KEEP_ALIVE_SLOTS as u64 {
+            tracker.issue(payload).unwrap();
+            tracker.missed_ticks = 0;
+        }
+        tracker.issue(100).unwrap();
+        assert_eq!(tracker.pending_count(), KEEP_ALIVE_SLOTS);
+        assert_eq!(
+            tracker.acknowledge(1),
+            Err(KeepAliveError::CorrelationMismatch)
+        );
+        assert_eq!(tracker.acknowledge(100), Ok(()));
+
+        let mut tracker = KeepAliveTracker::new();
+        assert_eq!(tracker.issue(0), Ok(1));
+        assert_eq!(tracker.acknowledge(1), Ok(()));
+    }
+
+    #[test]
+    fn keep_alive_payloads_are_non_zero_and_seed_deterministic() {
+        let mut a = KeepAlivePayloads::with_seed(42);
+        let mut b = KeepAlivePayloads::with_seed(42);
+        for _ in 0..1000 {
+            let value = a.next_payload();
+            assert_ne!(value, 0);
+            assert_eq!(value, b.next_payload());
+        }
+        assert_ne!(KeepAlivePayloads::with_seed(0).next_payload(), 0);
     }
 
     #[test]
